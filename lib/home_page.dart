@@ -132,6 +132,8 @@ class _HomePageState extends State<HomePage> {
     _log('فاصل: $_delaySeconds ثانية');
 
     bool allOk = true;
+    int sentCount = 0;
+    int failedCount = 0;
 
     for (int i = 1; i <= _count; i++) {
       if (_stopRequested) {
@@ -146,34 +148,49 @@ class _HomePageState extends State<HomePage> {
       _log('▶️ رسالة $i/$_count');
 
       try {
-        final opened = await WhatsAppBridge.openWhatsApp(
-          phone: phone,
-          message: message,
-          useBusiness: _useBusiness,
-        );
-        if (!opened) {
-          _log('❌ فشل فتح واتساب');
-          allOk = false;
-          break;
+        // ⭐ أول رسالة فقط: افتح واتساب على الشات
+        if (i == 1) {
+          _log('📱 جاري فتح الواتساب…');
+          final opened = await WhatsAppBridge.openWhatsApp(
+            phone: phone,
+            message: message,
+            useBusiness: _useBusiness,
+          );
+          if (!opened) {
+            _log('❌ فشل فتح واتساب');
+            allOk = false;
+            break;
+          }
+          _log('✅ اتفتح الواتساب');
+          await Future.delayed(const Duration(milliseconds: 3000));
+        } else {
+          // ⭐ الرسائل الباقية: اكتب في الحقل بس
+          final typed = await WhatsAppBridge.typeInInput(message);
+          if (!typed) {
+            _log('⚠️ فشل الكتابة في الحقل ($i)');
+            failedCount++;
+            await Future.delayed(const Duration(milliseconds: 1500));
+            continue;
+          }
+          await Future.delayed(const Duration(milliseconds: 500));
         }
-        _log('📱 اتفتح الواتساب');
 
-        await Future.delayed(const Duration(milliseconds: 2500));
         if (_stopRequested) break;
 
+        // اضغط إرسال
         _log('⏳ بدور على زر الإرسال…');
         final sent = await WhatsAppBridge.clickSend(timeoutMs: 6000);
         if (sent) {
-          _log('✅ اتبعتت $i');
+          sentCount++;
+          _log('✅ اتبعتت ($i)');
         } else {
+          failedCount++;
           _log('⚠️ مش لاقي زر الإرسال ($i)');
-          allOk = false;
         }
 
-        await Future.delayed(const Duration(milliseconds: 700));
-        await WhatsAppBridge.goBack();
-        await Future.delayed(const Duration(milliseconds: 500));
+        await Future.delayed(const Duration(milliseconds: 800));
 
+        // الفاصل بين الرسائل (مش بعد الأخير)
         if (i < _count && !_stopRequested) {
           _log('⏸ فاصل $_delaySeconds ثانية…');
           final step = 500;
@@ -187,6 +204,7 @@ class _HomePageState extends State<HomePage> {
       } catch (e) {
         _log('❌ خطأ: $e');
         allOk = false;
+        failedCount++;
         break;
       }
     }
@@ -195,9 +213,17 @@ class _HomePageState extends State<HomePage> {
       setState(() => _running = false);
     }
 
-    _log(allOk
-        ? '🎉 خلصت كل الرسائل ($_count)'
-        : '⚠️ توقفنا في رسالة $_currentIndex من $_count');
+    _log('═══ النتيجة النهائية ═══');
+    _log('✅ نجح: $sentCount');
+    if (failedCount > 0) _log('⚠️ فشل: $failedCount');
+
+    if (sentCount == _count) {
+      _log('🎉 خلصت كل الرسائل بنجاح');
+    } else if (sentCount > 0) {
+      _log('⚠️ خلصنا $sentCount من $_count');
+    } else {
+      _log('❌ مفيش رسائل اتبعتت');
+    }
   }
 
   void _stop() {
