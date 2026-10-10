@@ -5,12 +5,12 @@ import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.graphics.Rect
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import android.view.accessibility.AccessibilityWindowInfo
 
 class WatsAccessibilityService : AccessibilityService() {
 
@@ -22,6 +22,10 @@ class WatsAccessibilityService : AccessibilityService() {
 
         fun clickSendStatic(timeoutMs: Long): Boolean {
             return instance?.clickSendInternal(timeoutMs) ?: false
+        }
+
+        fun typeInInputStatic(text: String): Boolean {
+            return instance?.typeInInputInternal(text) ?: false
         }
 
         fun goBackStatic(): Boolean {
@@ -60,14 +64,10 @@ class WatsAccessibilityService : AccessibilityService() {
     override fun onInterrupt() {}
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // مفيش معالجة هنا — بس للـ clickSend
+        // مفيش معالجة هنا — بس للـ clickSend و typeInInput
     }
 
-    // ═══════════════════ البحث عن زر الإرسال ═══════════════════
-    /**
-     * يدور على زر الإرسال في واتساب لحد timeoutMs
-     * ويدوس عليه.
-     */
+    // ═══════════════════ زر الإرسال ═══════════════════
     private fun clickSendInternal(timeoutMs: Long): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         var attempts = 0
@@ -97,28 +97,8 @@ class WatsAccessibilityService : AccessibilityService() {
         return false
     }
 
-    /**
-     * يدور على زر الإرسال بعدة طرق:
-     * 1) viewId المعروف في واتساب العادي: com.whatsapp:id/send
-     * 2) viewId المعروف في واتساب بيزنس: com.whatsapp.w4b:id/send
-     * 3) contentDescription = "Send" / "إرسال"
-     * 4) أي عنصر clickable جنب حقل الكتابة
-     */
     private fun findSendButton(): AccessibilityNodeInfo? {
-        // جمع كل النوافذ
-        val roots = mutableListOf<AccessibilityNodeInfo>()
-        try {
-            val wins = windows
-            if (!wins.isNullOrEmpty()) {
-                for (w in wins) {
-                    val r = w.root ?: continue
-                    roots.add(r)
-                }
-            }
-        } catch (_: Exception) {}
-        if (roots.isEmpty()) {
-            rootInActiveWindow?.let { roots.add(it) }
-        }
+        val roots = collectRoots()
 
         // 1) ID معروف
         val ids = listOf(
@@ -149,8 +129,7 @@ class WatsAccessibilityService : AccessibilityService() {
         for (root in roots) {
             for (desc in descs) {
                 try {
-                    val list = root
-                        .findAccessibilityNodeInfosByText(desc)
+                    val list = root.findAccessibilityNodeInfosByText(desc)
                     if (list != null && list.isNotEmpty()) {
                         val n = list[0]
                         if (n.isVisibleToUser) return n
@@ -159,8 +138,7 @@ class WatsAccessibilityService : AccessibilityService() {
             }
         }
 
-        // 3) طريقة بديلة: دوّر على زر في آخر الشاشة (bottom-right)
-        // ده اللي عادة فيه زر الإرسال في واتساب
+        // 3) Fallback: زر في أسفل-يمين الشاشة
         val screenHeight = resources.displayMetrics.heightPixels
         val screenWidth = resources.displayMetrics.widthPixels
         var best: AccessibilityNodeInfo? = null
@@ -175,10 +153,6 @@ class WatsAccessibilityService : AccessibilityService() {
                     val rect = Rect()
                     node.getBoundsInScreen(rect)
 
-                    // الزر اللي بنبص عليه لازم يكون:
-                    // - في النص السفلي من الشاشة
-                    // - على اليمين شوية
-                    // - صغير نسبياً
                     val bottomPortion = rect.centerY() > screenHeight * 0.7
                     val rightPortion = rect.centerX() > screenWidth * 0.7
                     val reasonableSize = rect.width() < 300 &&
@@ -187,7 +161,6 @@ class WatsAccessibilityService : AccessibilityService() {
                             rect.height() > 20
 
                     if (bottomPortion && rightPortion && reasonableSize) {
-                        // الأولوية للأزرار اللي في أسفل-يمين بجد
                         val score = (rect.centerX() + rect.centerY()).toInt()
                         if (score > bestScore) {
                             bestScore = score
@@ -199,6 +172,103 @@ class WatsAccessibilityService : AccessibilityService() {
         }
 
         return best
+    }
+
+    // ═══════════════════ حقل الكتابة ═══════════════════
+    private fun typeInInputInternal(text: String): Boolean {
+        val roots = collectRoots()
+
+        // 1) ID معروف لحقل الكتابة
+        val ids = listOf(
+            "com.whatsapp:id/entry",
+            "com.whatsapp.w4b:id/entry"
+        )
+        for (root in roots) {
+            for (id in ids) {
+                try {
+                    val list = root.findAccessibilityNodeInfosByViewId(id)
+                    if (list != null && list.isNotEmpty()) {
+                        val node = list[0]
+                        if (node.isVisibleToUser && node.isEditable) {
+                            if (setTextInNode(node, text)) {
+                                Log.d(TAG, "text set via id=$id")
+                                return true
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+
+        // 2) Fallback: أول حقل قابل للكتابة في أسفل الشاشة
+        val screenHeight = resources.displayMetrics.heightPixels
+        var best: AccessibilityNodeInfo? = null
+        var bestY = -1
+
+        for (root in roots) {
+            walkNodes(root) { node ->
+                try {
+                    if (!node.isVisibleToUser) return@walkNodes
+                    if (!node.isEditable) return@walkNodes
+
+                    val rect = Rect()
+                    node.getBoundsInScreen(rect)
+
+                    if (rect.centerY() > screenHeight * 0.75) {
+                        if (rect.centerY() > bestY) {
+                            bestY = rect.centerY()
+                            best = node
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+
+        if (best != null) {
+            if (setTextInNode(best!!, text)) {
+                Log.d(TAG, "text set via fallback")
+                return true
+            }
+        }
+
+        Log.w(TAG, "input field not found")
+        return false
+    }
+
+    private fun setTextInNode(node: AccessibilityNodeInfo, text: String): Boolean {
+        try {
+            node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        } catch (_: Exception) {}
+
+        return try {
+            val args = Bundle().apply {
+                putCharSequence(
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                    text
+                )
+            }
+            node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    // ═══════════════════ Helpers ═══════════════════
+    private fun collectRoots(): List<AccessibilityNodeInfo> {
+        val roots = mutableListOf<AccessibilityNodeInfo>()
+        try {
+            val wins = windows
+            if (!wins.isNullOrEmpty()) {
+                for (w in wins) {
+                    val r = w.root ?: continue
+                    roots.add(r)
+                }
+            }
+        } catch (_: Exception) {}
+        if (roots.isEmpty()) {
+            rootInActiveWindow?.let { roots.add(it) }
+        }
+        return roots
     }
 
     private fun walkNodes(
@@ -216,14 +286,12 @@ class WatsAccessibilityService : AccessibilityService() {
     }
 
     private fun performClick(node: AccessibilityNodeInfo): Boolean {
-        // 1) جرّب ACTION_CLICK
         try {
             if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
                 return true
             }
         } catch (_: Exception) {}
 
-        // 2) جرّب على الأب
         try {
             var p = node.parent
             var d = 0
@@ -238,7 +306,6 @@ class WatsAccessibilityService : AccessibilityService() {
             }
         } catch (_: Exception) {}
 
-        // 3) gesture tap حقيقي في مكان الزر
         return gestureTap(node)
     }
 
