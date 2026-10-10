@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">wats</string>
+    <string name="accessibility_desc">تسمح لـ wats بضغط زر الإرسال في واتساب أوتوماتيك لإرسال الرسائل المتكررة.</string>
+</resources>
