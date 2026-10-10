@@ -46,6 +46,16 @@ class WhatsAppBridge {
     }
   }
 
+  static Future<bool> typeInInput(String text) async {
+    try {
+      return await _channel
+              .invokeMethod('typeInInput', {'text': text}) ??
+          false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   static Future<void> goBack() async {
     try {
       await _channel.invokeMethod('goBack');
