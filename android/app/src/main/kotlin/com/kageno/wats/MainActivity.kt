@@ -87,12 +87,14 @@ class MainActivity : FlutterActivity() {
             }
         }
 
+        // ⭐ تصحيح صيغة الـ Map — Kotlin بيستخدم mapOf
         WatsAccessibilityService.onDone = { sent, failed ->
             runOnUiThread {
-                channel?.invokeMethod("onDone", {
-                    "sent": sent,
-                    "failed": failed
-                })
+                val data = mapOf(
+                    "sent" to sent,
+                    "failed" to failed
+                )
+                channel?.invokeMethod("onDone", data)
             }
         }
     }
