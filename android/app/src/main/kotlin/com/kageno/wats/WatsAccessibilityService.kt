@@ -20,24 +20,59 @@ class WatsAccessibilityService : AccessibilityService() {
         @Volatile
         var instance: WatsAccessibilityService? = null
 
-        fun clickSendStatic(timeoutMs: Long): Boolean {
-            return instance?.clickSendInternal(timeoutMs) ?: false
-        }
+        @Volatile
+        var onProgress: ((String) -> Unit)? = null
+
+        @Volatile
+        var onDone: ((Int, Int) -> Unit)? = null
+
+        @Volatile
+        private var cachedSendId: String? = null
+
+        @Volatile
+        private var cachedInputId: String? = null
 
         fun typeInInputStatic(text: String): Boolean {
             return instance?.typeInInputInternal(text) ?: false
         }
 
-        fun goBackStatic(): Boolean {
-            return instance?.performGlobalAction(GLOBAL_ACTION_BACK) ?: false
+        /**
+         * ⭐ الدالة الرئيسية — بترسل كل الرسائل مرة واحدة
+         * من غير رجوع للـ Flutter بين كل رسالة
+         */
+        fun sendBulkStatic(
+            message: String,
+            count: Int,
+            delayMs: Long,
+        ) {
+            instance?.sendBulkInternal(message, count, delayMs)
         }
 
-        fun goHomeStatic(): Boolean {
-            return instance?.performGlobalAction(GLOBAL_ACTION_HOME) ?: false
+        fun stopBulk() {
+            instance?.stopRequested = true
+        }
+
+        fun clearCache() {
+            cachedSendId = null
+            cachedInputId = null
         }
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    @Volatile
+    private var stopRequested = false
+
+    private val sendIds = listOf(
+        "com.whatsapp:id/send",
+        "com.whatsapp.w4b:id/send",
+        "com.whatsapp:id/send_button",
+        "com.whatsapp.w4b:id/send_button"
+    )
+    private val inputIds = listOf(
+        "com.whatsapp:id/entry",
+        "com.whatsapp.w4b:id/entry"
+    )
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -48,12 +83,11 @@ class WatsAccessibilityService : AccessibilityService() {
                     AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
                     AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
                     AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
-            info.notificationTimeout = 30
+            info.notificationTimeout = 20
             serviceInfo = info
         } catch (e: Exception) {
             Log.e(TAG, "config", e)
         }
-        Log.d(TAG, "Service connected")
     }
 
     override fun onDestroy() {
@@ -63,183 +97,193 @@ class WatsAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {}
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // مفيش معالجة هنا — بس للـ clickSend و typeInInput
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+
+    // ═══════════════════ Bulk Send ═══════════════════
+    private fun sendBulkInternal(message: String, count: Int, delayMs: Long) {
+        stopRequested = false
+
+        Thread {
+            val startMs = System.currentTimeMillis()
+            var sentCount = 0
+            var failedCount = 0
+
+            progress("بدء $count رسالة")
+
+            for (i in 1..count) {
+                if (stopRequested) {
+                    progress("⏹ اتوقف")
+                    break
+                }
+
+                progress("▶️ $i/$count")
+
+                try {
+                    // 1) اكتب الرسالة
+                    val typed = typeInInputInternal(message)
+                    if (!typed) {
+                        failedCount++
+                        progress("⚠️ فشل الكتابة ($i)")
+                        sleepMs(200)
+                        continue
+                    }
+
+                    // 2) اضغط إرسال (بمحاولة سريعة)
+                    val sent = clickSendInternal(1500)
+                    if (sent) {
+                        sentCount++
+                        progress("✅ $i")
+                    } else {
+                        failedCount++
+                        progress("⚠️ زر الإرسال مش موجود ($i)")
+                    }
+
+                    // 3) فاصل قصير جداً بين الرسائل
+                    if (i < count && delayMs > 0) {
+                        sleepMs(delayMs)
+                    } else if (i < count) {
+                        sleepMs(50) // 50ms بس عشان WhatsApp يلحق
+                    }
+                } catch (e: Exception) {
+                    failedCount++
+                    Log.e(TAG, "send error", e)
+                    progress("❌ خطأ في $i")
+                }
+            }
+
+            val elapsed = System.currentTimeMillis() - startMs
+            val elapsedSec = elapsed / 1000.0
+            val avg = if (sentCount > 0) elapsedSec / sentCount else 0.0
+
+            progress("═══ خلصنا: ✅ $sentCount | ⚠️ $failedCount | ⏱ ${"%.1f".format(elapsedSec)}ث | متوسط ${"%.2f".format(avg)}ث/رسالة")
+
+            try {
+                onDone?.invoke(sentCount, failedCount)
+            } catch (_: Exception) {}
+        }.start()
     }
 
-    // ═══════════════════ زر الإرسال ═══════════════════
+    private fun progress(msg: String) {
+        try {
+            onProgress?.invoke(msg)
+        } catch (_: Exception) {}
+    }
+
+    private fun sleepMs(ms: Long) {
+        try {
+            Thread.sleep(ms)
+        } catch (_: InterruptedException) {}
+    }
+
+    // ═══════════════════ زر الإرسال (سريع) ═══════════════════
     private fun clickSendInternal(timeoutMs: Long): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
-        var attempts = 0
 
         while (System.currentTimeMillis() < deadline) {
-            attempts++
-            try {
-                val node = findSendButton()
-                if (node != null) {
-                    if (performClick(node)) {
-                        Log.d(TAG, "Send clicked after $attempts attempts")
+            // Cache first
+            val cached = cachedSendId
+            if (cached != null) {
+                val n = findByViewIdFast(cached)
+                if (n != null && performClick(n)) {
+                    return true
+                }
+                cachedSendId = null
+            }
+
+            // Try known IDs
+            for (id in sendIds) {
+                val n = findByViewIdFast(id)
+                if (n != null) {
+                    if (performClick(n)) {
+                        cachedSendId = id
                         return true
                     }
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "clickSend error", e)
             }
 
-            try {
-                Thread.sleep(300)
-            } catch (_: InterruptedException) {
-                return false
-            }
+            sleepMs(20)
         }
-
-        Log.w(TAG, "Send button not found after $attempts attempts")
         return false
     }
 
-    private fun findSendButton(): AccessibilityNodeInfo? {
-        val roots = collectRoots()
-
-        // 1) ID معروف
-        val ids = listOf(
-            "com.whatsapp:id/send",
-            "com.whatsapp.w4b:id/send",
-            "com.whatsapp:id/send_button",
-            "com.whatsapp.w4b:id/send_button"
-        )
-        for (root in roots) {
-            for (id in ids) {
-                try {
-                    val list = root.findAccessibilityNodeInfosByViewId(id)
-                    if (list != null && list.isNotEmpty()) {
-                        val n = list[0]
-                        if (n.isVisibleToUser) return n
-                    }
-                } catch (_: Exception) {}
+    // ═══════════════════ كتابة سريعة ═══════════════════
+    private fun typeInInputInternal(text: String): Boolean {
+        // Cache first
+        val cached = cachedInputId
+        if (cached != null) {
+            val n = findByViewIdFast(cached)
+            if (n != null && n.isEditable) {
+                if (setTextInNode(n, text)) return true
+                cachedInputId = null
             }
         }
 
-        // 2) contentDescription
-        val descs = listOf(
-            "Send", "send", "SEND",
-            "إرسال", "ارسال",
-            "Send message",
-            "إرسال الرسالة"
-        )
-        for (root in roots) {
-            for (desc in descs) {
-                try {
-                    val list = root.findAccessibilityNodeInfosByText(desc)
-                    if (list != null && list.isNotEmpty()) {
-                        val n = list[0]
-                        if (n.isVisibleToUser) return n
-                    }
-                } catch (_: Exception) {}
+        // Try known IDs
+        for (id in inputIds) {
+            val n = findByViewIdFast(id)
+            if (n != null && n.isEditable) {
+                if (setTextInNode(n, text)) {
+                    cachedInputId = id
+                    return true
+                }
             }
         }
 
-        // 3) Fallback: زر في أسفل-يمين الشاشة
+        // Fallback
+        val n = findInputFallbackFast()
+        if (n != null && setTextInNode(n, text)) {
+            return true
+        }
+
+        return false
+    }
+
+    // ═══════════════════ Helpers ═══════════════════
+    private fun findByViewIdFast(id: String): AccessibilityNodeInfo? {
+        try {
+            val active = rootInActiveWindow ?: return null
+            val list = active.findAccessibilityNodeInfosByViewId(id)
+            if (list != null && list.isNotEmpty()) {
+                val n = list[0]
+                if (n.isVisibleToUser) return n
+            }
+        } catch (_: Exception) {}
+        return null
+    }
+
+    private fun findInputFallbackFast(): AccessibilityNodeInfo? {
+        val active = rootInActiveWindow ?: return null
         val screenHeight = resources.displayMetrics.heightPixels
-        val screenWidth = resources.displayMetrics.widthPixels
+
         var best: AccessibilityNodeInfo? = null
-        var bestScore = -1
+        var bestY = -1
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(active)
 
-        for (root in roots) {
-            walkNodes(root) { node ->
-                try {
-                    if (!node.isVisibleToUser) return@walkNodes
-                    if (!node.isClickable) return@walkNodes
-
+        var iter = 0
+        while (queue.isNotEmpty() && iter < 200) {
+            iter++
+            val node = queue.removeFirst()
+            try {
+                if (node.isVisibleToUser && node.isEditable) {
                     val rect = Rect()
                     node.getBoundsInScreen(rect)
-
-                    val bottomPortion = rect.centerY() > screenHeight * 0.7
-                    val rightPortion = rect.centerX() > screenWidth * 0.7
-                    val reasonableSize = rect.width() < 300 &&
-                            rect.height() < 300 &&
-                            rect.width() > 20 &&
-                            rect.height() > 20
-
-                    if (bottomPortion && rightPortion && reasonableSize) {
-                        val score = (rect.centerX() + rect.centerY()).toInt()
-                        if (score > bestScore) {
-                            bestScore = score
-                            best = node
-                        }
+                    if (rect.centerY() > screenHeight * 0.75 &&
+                        rect.centerY() > bestY
+                    ) {
+                        bestY = rect.centerY()
+                        best = node
                     }
-                } catch (_: Exception) {}
-            }
+                }
+                for (i in 0 until node.childCount) {
+                    node.getChild(i)?.let { queue.add(it) }
+                }
+            } catch (_: Exception) {}
         }
-
         return best
     }
 
-    // ═══════════════════ حقل الكتابة ═══════════════════
-    private fun typeInInputInternal(text: String): Boolean {
-        val roots = collectRoots()
-
-        // 1) ID معروف لحقل الكتابة
-        val ids = listOf(
-            "com.whatsapp:id/entry",
-            "com.whatsapp.w4b:id/entry"
-        )
-        for (root in roots) {
-            for (id in ids) {
-                try {
-                    val list = root.findAccessibilityNodeInfosByViewId(id)
-                    if (list != null && list.isNotEmpty()) {
-                        val node = list[0]
-                        if (node.isVisibleToUser && node.isEditable) {
-                            if (setTextInNode(node, text)) {
-                                Log.d(TAG, "text set via id=$id")
-                                return true
-                            }
-                        }
-                    }
-                } catch (_: Exception) {}
-            }
-        }
-
-        // 2) Fallback: أول حقل قابل للكتابة في أسفل الشاشة
-        val screenHeight = resources.displayMetrics.heightPixels
-        var best: AccessibilityNodeInfo? = null
-        var bestY = -1
-
-        for (root in roots) {
-            walkNodes(root) { node ->
-                try {
-                    if (!node.isVisibleToUser) return@walkNodes
-                    if (!node.isEditable) return@walkNodes
-
-                    val rect = Rect()
-                    node.getBoundsInScreen(rect)
-
-                    if (rect.centerY() > screenHeight * 0.75) {
-                        if (rect.centerY() > bestY) {
-                            bestY = rect.centerY()
-                            best = node
-                        }
-                    }
-                } catch (_: Exception) {}
-            }
-        }
-
-        if (best != null) {
-            if (setTextInNode(best!!, text)) {
-                Log.d(TAG, "text set via fallback")
-                return true
-            }
-        }
-
-        Log.w(TAG, "input field not found")
-        return false
-    }
-
     private fun setTextInNode(node: AccessibilityNodeInfo, text: String): Boolean {
-        try {
-            node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-        } catch (_: Exception) {}
-
         return try {
             val args = Bundle().apply {
                 putCharSequence(
@@ -253,80 +297,12 @@ class WatsAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ═══════════════════ Helpers ═══════════════════
-    private fun collectRoots(): List<AccessibilityNodeInfo> {
-        val roots = mutableListOf<AccessibilityNodeInfo>()
-        try {
-            val wins = windows
-            if (!wins.isNullOrEmpty()) {
-                for (w in wins) {
-                    val r = w.root ?: continue
-                    roots.add(r)
-                }
-            }
-        } catch (_: Exception) {}
-        if (roots.isEmpty()) {
-            rootInActiveWindow?.let { roots.add(it) }
-        }
-        return roots
-    }
-
-    private fun walkNodes(
-        node: AccessibilityNodeInfo?,
-        action: (AccessibilityNodeInfo) -> Unit
-    ) {
-        if (node == null) return
-        try {
-            node.refresh()
-            action(node)
-            for (i in 0 until node.childCount) {
-                walkNodes(node.getChild(i), action)
-            }
-        } catch (_: Exception) {}
-    }
-
     private fun performClick(node: AccessibilityNodeInfo): Boolean {
         try {
             if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
                 return true
             }
         } catch (_: Exception) {}
-
-        try {
-            var p = node.parent
-            var d = 0
-            while (p != null && d < 5) {
-                if (p.isClickable &&
-                    p.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                ) {
-                    return true
-                }
-                p = p.parent
-                d++
-            }
-        } catch (_: Exception) {}
-
-        return gestureTap(node)
-    }
-
-    private fun gestureTap(node: AccessibilityNodeInfo): Boolean {
-        return try {
-            val rect = Rect()
-            node.getBoundsInScreen(rect)
-            if (rect.width() <= 0 || rect.height() <= 0) return false
-
-            val path = Path().apply {
-                moveTo(rect.exactCenterX(), rect.exactCenterY())
-            }
-            val stroke = GestureDescription.StrokeDescription(path, 0, 60)
-            val gesture = GestureDescription.Builder()
-                .addStroke(stroke).build()
-
-            dispatchGesture(gesture, null, mainHandler)
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "gestureTap", e)
-            false
-        }
+        return false
     }
 }
