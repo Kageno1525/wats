@@ -84,12 +84,8 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  // ═══ Phone formatting ═══
   String _cleanPhone(String raw) {
-    var s = raw.replaceAll(RegExp(r'[^0-9]'), '');
-    // لو الرقم بيبدأ بـ 0 (خط محلي) نشيله — عادة بدولة بتبدأ بكود
-    // نخليه للمستخدم يكتب كامل بكود الدولة
-    return s;
+    return raw.replaceAll(RegExp(r'[^0-9]'), '');
   }
 
   // ═══ Start sending ═══
@@ -150,7 +146,6 @@ class _HomePageState extends State<HomePage> {
       _log('▶️ رسالة $i/$_count');
 
       try {
-        // 1) افتح واتساب مع الرقم والرسالة
         final opened = await WhatsAppBridge.openWhatsApp(
           phone: phone,
           message: message,
@@ -163,11 +158,9 @@ class _HomePageState extends State<HomePage> {
         }
         _log('📱 اتفتح الواتساب');
 
-        // 2) استنى شويّة لحد ما الصفحة تحمّل
         await Future.delayed(const Duration(milliseconds: 2500));
         if (_stopRequested) break;
 
-        // 3) اضغط إرسال
         _log('⏳ بدور على زر الإرسال…');
         final sent = await WhatsAppBridge.clickSend(timeoutMs: 6000);
         if (sent) {
@@ -177,19 +170,17 @@ class _HomePageState extends State<HomePage> {
           allOk = false;
         }
 
-        // 4) ارجع للشات ليست عشان الرسالة تتجدد
         await Future.delayed(const Duration(milliseconds: 700));
         await WhatsAppBridge.goBack();
         await Future.delayed(const Duration(milliseconds: 500));
 
-        // 5) الفاصل بين الرسائل (مش بعد الأخير)
         if (i < _count && !_stopRequested) {
           _log('⏸ فاصل $_delaySeconds ثانية…');
           final step = 500;
           final total = _delaySeconds * 1000;
           var elapsed = 0;
           while (elapsed < total && !_stopRequested) {
-            await Future.delayed(const Duration(milliseconds: step));
+            await Future.delayed(Duration(milliseconds: step));
             elapsed += step;
           }
         }
@@ -285,7 +276,6 @@ class _HomePageState extends State<HomePage> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      // Accessibility status
                       if (!_accessibilityOn)
                         Padding(
                           padding: const EdgeInsets.only(bottom: 12),
@@ -295,7 +285,8 @@ class _HomePageState extends State<HomePage> {
                             text: 'Accessibility Service مش مفعّل',
                             actionLabel: 'تفعيل',
                             onAction: () async {
-                              await WhatsAppBridge.openAccessibilitySettings();
+                              await WhatsAppBridge
+                                  .openAccessibilitySettings();
                               await Future.delayed(
                                   const Duration(seconds: 1));
                               _refreshPermissions();
@@ -365,7 +356,6 @@ class _HomePageState extends State<HomePage> {
           ),
           const SizedBox(height: 14),
 
-          // WhatsApp type
           Row(
             children: [
               Expanded(
@@ -416,7 +406,8 @@ class _HomePageState extends State<HomePage> {
           borderRadius: BorderRadius.circular(12),
           onTap: enabled ? onTap : null,
           child: Container(
-            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
+            padding: const EdgeInsets.symmetric(
+                vertical: 12, horizontal: 10),
             decoration: BoxDecoration(
               color: selected
                   ? color.withOpacity(0.2)
@@ -542,7 +533,8 @@ class _HomePageState extends State<HomePage> {
                       color: const Color(0xFFFF6B6B).withOpacity(0.15),
                       borderRadius: BorderRadius.circular(14),
                       border: Border.all(
-                          color: const Color(0xFFFF6B6B).withOpacity(0.4)),
+                          color: const Color(0xFFFF6B6B)
+                              .withOpacity(0.4)),
                     ),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
@@ -576,7 +568,8 @@ class _HomePageState extends State<HomePage> {
       decoration: BoxDecoration(
         color: theme.colorScheme.surface.withOpacity(0.5),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: theme.colorScheme.primary.withOpacity(0.15)),
+        border:
+            Border.all(color: theme.colorScheme.primary.withOpacity(0.15)),
       ),
       child: child,
     );
