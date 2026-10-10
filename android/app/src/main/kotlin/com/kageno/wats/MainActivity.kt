@@ -11,16 +11,17 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "wats/whatsapp"
+    private var channel: MethodChannel? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        val channel = MethodChannel(
+        channel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             CHANNEL
         )
 
-        channel.setMethodCallHandler { call, result ->
+        channel?.setMethodCallHandler { call, result ->
             when (call.method) {
                 "isAccessibilityEnabled" -> {
                     result.success(isAccessibilityEnabled())
@@ -60,39 +61,38 @@ class MainActivity : FlutterActivity() {
                     }.start()
                 }
 
-                "clickSend" -> {
-                    val timeout = call.argument<Int>("timeout") ?: 6000
-                    Thread {
-                        val ok = WatsAccessibilityService.clickSendStatic(
-                            timeout.toLong()
-                        )
-                        Handler(Looper.getMainLooper()).post {
-                            result.success(ok)
-                        }
-                    }.start()
-                }
+                "sendBulk" -> {
+                    val message = call.argument<String>("message") ?: ""
+                    val count = call.argument<Int>("count") ?: 1
+                    val delay = call.argument<Int>("delayMs")?.toLong() ?: 0L
 
-                "typeInInput" -> {
-                    val text = call.argument<String>("text") ?: ""
-                    Thread {
-                        val ok = WatsAccessibilityService.typeInInputStatic(text)
-                        Handler(Looper.getMainLooper()).post {
-                            result.success(ok)
-                        }
-                    }.start()
-                }
-
-                "goBack" -> {
-                    WatsAccessibilityService.goBackStatic()
+                    WatsAccessibilityService.sendBulkStatic(
+                        message, count, delay
+                    )
                     result.success(null)
                 }
 
-                "goHome" -> {
-                    WatsAccessibilityService.goHomeStatic()
+                "stopBulk" -> {
+                    WatsAccessibilityService.stopBulk()
                     result.success(null)
                 }
 
                 else -> result.notImplemented()
+            }
+        }
+
+        WatsAccessibilityService.onProgress = { msg ->
+            runOnUiThread {
+                channel?.invokeMethod("onProgress", msg)
+            }
+        }
+
+        WatsAccessibilityService.onDone = { sent, failed ->
+            runOnUiThread {
+                channel?.invokeMethod("onDone", {
+                    "sent": sent,
+                    "failed": failed
+                })
             }
         }
     }
@@ -107,7 +107,6 @@ class MainActivity : FlutterActivity() {
             if (cleanPhone.isEmpty()) return false
 
             val encodedMsg = Uri.encode(message)
-
             val scheme = if (business) "whatsapp-business" else "whatsapp"
             val uri = Uri.parse("$scheme://send?phone=$cleanPhone&text=$encodedMsg")
             val intent = Intent(Intent.ACTION_VIEW, uri)
@@ -120,8 +119,7 @@ class MainActivity : FlutterActivity() {
             try {
                 startActivity(intent)
                 return true
-            } catch (_: Exception) {
-            }
+            } catch (_: Exception) {}
 
             val waUrl = "https://wa.me/$cleanPhone?text=$encodedMsg"
             val fallback = Intent(Intent.ACTION_VIEW, Uri.parse(waUrl))
@@ -133,8 +131,7 @@ class MainActivity : FlutterActivity() {
             try {
                 startActivity(fallback)
                 return true
-            } catch (_: Exception) {
-            }
+            } catch (_: Exception) {}
 
             val browserFallback = Intent(
                 Intent.ACTION_VIEW,
