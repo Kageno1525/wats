@@ -19,17 +19,14 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   final _phoneCtrl = TextEditingController();
   final _msgCtrl = TextEditingController();
-  final _countCtrl = TextEditingController(text: '1');
-  final _delayCtrl = TextEditingController(text: '5');
+  final _countCtrl = TextEditingController(text: '10');
+  final _delayCtrl = TextEditingController(text: '0');
 
   final ValueNotifier<List<String>> _logs =
       ValueNotifier<List<String>>(<String>[]);
 
-  int _count = 1;
-  int _delaySeconds = 5;
-  bool _running = false;
-  bool _stopRequested = false;
   int _currentIndex = 0;
+  bool _running = false;
 
   bool _accessibilityOn = false;
   bool _whatsappOk = false;
@@ -40,6 +37,27 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+
+    // ⭐ ربط الـ callbacks من Native
+    WhatsAppBridge.setListener(
+      onProgress: (msg) {
+        if (!mounted) return;
+        _log(msg);
+        // لو الرسالة "▶️ i/count" — نحدّث الـ index
+        if (msg.startsWith('▶️')) {
+          final parts = msg.replaceAll('▶️ ', '').split('/');
+          if (parts.isNotEmpty) {
+            _currentIndex = int.tryParse(parts[0].trim()) ?? 0;
+            setState(() {});
+          }
+        }
+      },
+      onDone: (sent, failed) {
+        if (!mounted) return;
+        setState(() => _running = false);
+      },
+    );
+
     Future.microtask(_bootstrap);
   }
 
@@ -56,7 +74,7 @@ class _HomePageState extends State<HomePage> {
   void _log(String msg) {
     final cur = _logs.value;
     final upd = <String>['${_timeNow()}  $msg', ...cur];
-    if (upd.length > 200) upd.removeRange(200, upd.length);
+    if (upd.length > 300) upd.removeRange(300, upd.length);
     _logs.value = upd;
   }
 
@@ -88,7 +106,7 @@ class _HomePageState extends State<HomePage> {
     return raw.replaceAll(RegExp(r'[^0-9]'), '');
   }
 
-  // ═══ Start sending ═══
+  // ═══ Start ═══
   Future<void> _start() async {
     final phone = _cleanPhone(_phoneCtrl.text);
     final message = _msgCtrl.text.trim();
@@ -114,121 +132,47 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    _count = int.tryParse(_countCtrl.text.trim()) ?? 1;
-    _delaySeconds = int.tryParse(_delayCtrl.text.trim()) ?? 5;
-    if (_count < 1) _count = 1;
-    if (_delaySeconds < 1) _delaySeconds = 1;
+    final count = int.tryParse(_countCtrl.text.trim()) ?? 1;
+    final delay = int.tryParse(_delayCtrl.text.trim()) ?? 0;
+    final countFinal = count < 1 ? 1 : count;
+    final delayFinal = delay < 0 ? 0 : delay;
 
     setState(() {
       _running = true;
-      _stopRequested = false;
       _currentIndex = 0;
     });
     _logs.value = [];
 
-    _log('═══ بدء الإرسال ═══');
-    _log('رقم: $phone');
-    _log('عدد: $_count رسالة');
-    _log('فاصل: $_delaySeconds ثانية');
+    _log('═══ بدء $countFinal رسالة (فاصل ${delayFinal}ث) ═══');
 
-    bool allOk = true;
-    int sentCount = 0;
-    int failedCount = 0;
-
-    for (int i = 1; i <= _count; i++) {
-      if (_stopRequested) {
-        _log('⏹ تم الإيقاف');
-        allOk = false;
-        break;
-      }
-
-      _currentIndex = i;
-      if (mounted) setState(() {});
-
-      _log('▶️ رسالة $i/$_count');
-
-      try {
-        // ⭐ أول رسالة فقط: افتح واتساب على الشات
-        if (i == 1) {
-          _log('📱 جاري فتح الواتساب…');
-          final opened = await WhatsAppBridge.openWhatsApp(
-            phone: phone,
-            message: message,
-            useBusiness: _useBusiness,
-          );
-          if (!opened) {
-            _log('❌ فشل فتح واتساب');
-            allOk = false;
-            break;
-          }
-          _log('✅ اتفتح الواتساب');
-          await Future.delayed(const Duration(milliseconds: 3000));
-        } else {
-          // ⭐ الرسائل الباقية: اكتب في الحقل بس
-          final typed = await WhatsAppBridge.typeInInput(message);
-          if (!typed) {
-            _log('⚠️ فشل الكتابة في الحقل ($i)');
-            failedCount++;
-            await Future.delayed(const Duration(milliseconds: 1500));
-            continue;
-          }
-          await Future.delayed(const Duration(milliseconds: 500));
-        }
-
-        if (_stopRequested) break;
-
-        // اضغط إرسال
-        _log('⏳ بدور على زر الإرسال…');
-        final sent = await WhatsAppBridge.clickSend(timeoutMs: 6000);
-        if (sent) {
-          sentCount++;
-          _log('✅ اتبعتت ($i)');
-        } else {
-          failedCount++;
-          _log('⚠️ مش لاقي زر الإرسال ($i)');
-        }
-
-        await Future.delayed(const Duration(milliseconds: 800));
-
-        // الفاصل بين الرسائل (مش بعد الأخير)
-        if (i < _count && !_stopRequested) {
-          _log('⏸ فاصل $_delaySeconds ثانية…');
-          final step = 500;
-          final total = _delaySeconds * 1000;
-          var elapsed = 0;
-          while (elapsed < total && !_stopRequested) {
-            await Future.delayed(Duration(milliseconds: step));
-            elapsed += step;
-          }
-        }
-      } catch (e) {
-        _log('❌ خطأ: $e');
-        allOk = false;
-        failedCount++;
-        break;
-      }
-    }
-
-    if (mounted) {
+    // 1) افتح الواتساب على الشات
+    _log('📱 فتح الواتساب…');
+    final opened = await WhatsAppBridge.openWhatsApp(
+      phone: phone,
+      message: message,
+      useBusiness: _useBusiness,
+    );
+    if (!opened) {
+      _log('❌ فشل فتح واتساب');
       setState(() => _running = false);
+      return;
     }
 
-    _log('═══ النتيجة النهائية ═══');
-    _log('✅ نجح: $sentCount');
-    if (failedCount > 0) _log('⚠️ فشل: $failedCount');
+    // 2) استنى الواتساب يفتح (1.5 ثانية بس)
+    await Future.delayed(const Duration(milliseconds: 1500));
 
-    if (sentCount == _count) {
-      _log('🎉 خلصت كل الرسائل بنجاح');
-    } else if (sentCount > 0) {
-      _log('⚠️ خلصنا $sentCount من $_count');
-    } else {
-      _log('❌ مفيش رسائل اتبعتت');
-    }
+    // 3) شغل الـ Bulk من الـ Native
+    _log('🚀 بدء الإرسال السريع…');
+    await WhatsAppBridge.sendBulk(
+      message: message,
+      count: countFinal,
+      delayMs: delayFinal * 1000,
+    );
   }
 
-  void _stop() {
-    setState(() => _stopRequested = true);
+  Future<void> _stop() async {
     _log('⏹ بطلب إيقاف…');
+    await WhatsAppBridge.stopBulk();
   }
 
   @override
@@ -242,7 +186,6 @@ class _HomePageState extends State<HomePage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // ═══ Header ═══
               Row(
                 children: [
                   Container(
@@ -296,7 +239,6 @@ class _HomePageState extends State<HomePage> {
               ),
               const SizedBox(height: 12),
 
-              // ═══ Body ═══
               Expanded(
                 child: SingleChildScrollView(
                   child: Column(
@@ -525,6 +467,8 @@ class _HomePageState extends State<HomePage> {
                         isDense: true,
                         contentPadding:
                             EdgeInsets.symmetric(vertical: 14),
+                        helperText: '0 = سريع جداً',
+                        helperStyle: TextStyle(fontSize: 10),
                       ),
                     ),
                   ],
@@ -532,10 +476,37 @@ class _HomePageState extends State<HomePage> {
               ),
             ],
           ),
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF25D366).withOpacity(0.08),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                  color: const Color(0xFF25D366).withOpacity(0.25)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.bolt_rounded,
+                    size: 18, color: Color(0xFF25D366)),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'الفاصل 0 = سرعة قصوى (≈ 0.5 ث/رسالة)',
+                    style: kNoDeco.copyWith(
+                      fontSize: 11,
+                      color: const Color(0xFF25D366),
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
           const SizedBox(height: 16),
           PrimaryBtn(
             label: _running
-                ? 'جاري الإرسال ($_currentIndex/$_count)'
+                ? 'جاري الإرسال ($_currentIndex)'
                 : 'ابدأ الإرسال',
             icon: _running
                 ? Icons.hourglass_top_rounded
