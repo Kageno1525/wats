@@ -72,6 +72,16 @@ class MainActivity : FlutterActivity() {
                     }.start()
                 }
 
+                "typeInInput" -> {
+                    val text = call.argument<String>("text") ?: ""
+                    Thread {
+                        val ok = WatsAccessibilityService.typeInInputStatic(text)
+                        Handler(Looper.getMainLooper()).post {
+                            result.success(ok)
+                        }
+                    }.start()
+                }
+
                 "goBack" -> {
                     WatsAccessibilityService.goBackStatic()
                     result.success(null)
@@ -87,10 +97,6 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    /**
-     * يفتح واتساب بالرقم والرسالة الجاهزة
-     * يستخدم intent رسمي من واتساب
-     */
     private fun openWhatsApp(
         phone: String,
         message: String,
@@ -102,12 +108,10 @@ class MainActivity : FlutterActivity() {
 
             val encodedMsg = Uri.encode(message)
 
-            // 1) جرّب whatsapp scheme الرسمي
             val scheme = if (business) "whatsapp-business" else "whatsapp"
             val uri = Uri.parse("$scheme://send?phone=$cleanPhone&text=$encodedMsg")
             val intent = Intent(Intent.ACTION_VIEW, uri)
 
-            // 2) تحديد الباكدج المناسب
             intent.setPackage(
                 if (business) "com.whatsapp.w4b" else "com.whatsapp"
             )
@@ -117,7 +121,6 @@ class MainActivity : FlutterActivity() {
                 startActivity(intent)
                 return true
             } catch (_: Exception) {
-                // 3) fallback: استخدم wa.me URL
             }
 
             val waUrl = "https://wa.me/$cleanPhone?text=$encodedMsg"
@@ -131,7 +134,6 @@ class MainActivity : FlutterActivity() {
                 startActivity(fallback)
                 return true
             } catch (_: Exception) {
-                // 4) fallback أخير: من غير تحديد الباكدج
             }
 
             val browserFallback = Intent(
